@@ -31,8 +31,6 @@ impl TryFrom<Bytes> for Request<LayoutVerified<Bytes, ExampleKey>> {
     type Error = (); // Actual error type goes here
 
     fn try_from(bytes: Bytes) -> Result<Self, Self::Error> {
-        let length = bytes.len();
-
         LayoutVerified::new_unaligned(bytes).map(Request).ok_or(())
     }
 }
