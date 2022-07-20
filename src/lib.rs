@@ -1,8 +1,12 @@
+use std::{convert::Infallible, task::{Context, Poll}};
+
 use bytes::Bytes;
+use futures_util::future::{Ready, ok};
 use zerocopy::{U64, BigEndian, LayoutVerified, FromBytes, AsBytes, Unaligned};
+use tower_service::Service;
 
 // The actual Key type is used to perform a lookup in a database elsewhere in the application logic
-#[derive(AsBytes, Clone, Debug, FromBytes, Unaligned)]
+#[derive(AsBytes, Clone, Debug, Eq, FromBytes, Unaligned, PartialEq)]
 #[repr(C)]
 pub struct ExampleKey(pub U64<BigEndian>);
 
@@ -25,12 +29,58 @@ pub struct ExampleKey(pub U64<BigEndian>);
 // to those bytes, but I really struggled to make the compiler happy with that.
 // That's why I think I want `Bytes` and `BytesMut` from the `bytes` crate to
 // implement `zerocopy::ByteSlice`.
+#[derive(Eq, PartialEq)]
 pub struct Request<K>(pub K);
 
-impl TryFrom<Bytes> for Request<LayoutVerified<Bytes, ExampleKey>> {
+// Here is the problem:
+
+// I can add an explicit lifetime here, and the compiler won't complain. The 
+// returned request now has a reference to the bytes chunk.
+impl<'a> TryFrom<&'a Bytes> for Request<LayoutVerified<&'a [u8], ExampleKey>> {
     type Error = (); // Actual error type goes here
 
-    fn try_from(bytes: Bytes) -> Result<Self, Self::Error> {
-        LayoutVerified::new_unaligned(bytes).map(Request).ok_or(())
+    fn try_from(bytes: &'a Bytes) -> Result<Self, Self::Error> {
+        LayoutVerified::new_unaligned(bytes.as_ref()).map(Request).ok_or(())
     }
+}
+
+struct ExampleResponse;
+
+struct ExampleService;
+
+// Then we have a service that the server will use to make a response to send 
+// back to the client. The compiler will let you elide the explicit lifetime 'a, 
+// but I kept it here for clarity.
+impl<'a> Service<Request<LayoutVerified<&'a [u8], ExampleKey>>> for ExampleService {
+    type Response = ExampleResponse;
+    type Error = Infallible;
+    type Future = Ready<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _request: Request<LayoutVerified<&'a [u8], ExampleKey>>) -> Self::Future {
+        // use the request
+        // produce a response
+        ok(ExampleResponse)
+    }
+}
+
+// Here's where the error shows up:
+// The server networking code reads bytes from the connection, parses it, and 
+// passes the request to the service to get a response. Unfortunately, because 
+// the request has a borrowed reference instead of owning the underlying bytes, 
+// the request we pass in doesn't live long enough.
+async fn server_networking_code<'a, S>(mut service: S) 
+where
+    S: Service<Request<LayoutVerified<&'a [u8], ExampleKey>>, Response = ExampleResponse, Error = Infallible>,
+{
+    const REQUEST: &[u8] = &[0xff; 4];
+
+    // Accept a connection, read bytes
+    let incoming_request = Bytes::from(REQUEST);
+    // Parse the request by reading bytes from the connection
+    let parsed_request = Request::try_from(&incoming_request).unwrap();
+    let response = service.call(parsed_request).await.unwrap();
 }
