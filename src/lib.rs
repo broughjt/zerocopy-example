@@ -80,7 +80,7 @@ where
 
     // Accept a connection, read bytes
     let incoming_request = Bytes::from(REQUEST);
-    // Parse the request by reading bytes from the connection
+    // Parse the request
     let parsed_request = Request::try_from(&incoming_request).unwrap();
     let response = service.call(parsed_request).await.unwrap();
 }
